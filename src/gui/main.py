@@ -624,19 +624,6 @@ print(json.dumps(devices))
         # Run in a thread so the GUI doesn't freeze while talking to D-Bus
         threading.Thread(target=apply_thread, daemon=True).start()
 
-    def remove_override(self):
-        """Removes the manual override and hands control back to the auto-switcher."""
-        state_file = os.path.expanduser("~/.config/mouse-switcher/active.state")
-        with open(state_file, "w") as sf:
-            sf.write("Resuming Auto-Switch...")
-            
-        script_path = os.path.expanduser("~/.local/bin/mouse-switcher")
-        
-        # Kill, wait, and spawn cleanly
-        subprocess.run(["pkill", "-f", "bin/mouse-switcher"])
-        time.sleep(0.5)
-        subprocess.Popen(["bash", script_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
     # --- TAB 4: DAEMON & LOGS ---
     def build_logs_tab(self):
         frame = ttk.Frame(self.notebook, padding=15)
@@ -665,9 +652,8 @@ print(json.dumps(devices))
             self.log_text.see(tk.END)
             self.log_text.config(state="disabled")
 
-        # --- NEW: Check if the background bash script is actually running ---
         # pgrep returns 0 if a matching process is found, 1 if it is dead.
-        check_proc = subprocess.run(["pgrep", "-f", "bin/mouse-switcher"], capture_output=True)
+        check_proc = subprocess.run(["pgrep", "-f", "bin/mouse-switcher$"], capture_output=True)
         is_running = (check_proc.returncode == 0)
 
         if is_running:
@@ -700,20 +686,29 @@ print(json.dumps(devices))
     def restart_daemon(self):
         script_path = os.path.expanduser("~/.local/bin/mouse-switcher")
         
-        # 1. Send the kill signal
-        subprocess.run(["pkill", "-f", "bin/mouse-switcher"])
+        # Add the $ here
+        subprocess.run(["pkill", "-f", "bin/mouse-switcher$"])
         
-        # 2. Wait exactly half a second for Linux to clear the process
         time.sleep(0.5)
-        
-        # 3. Explicitly use 'bash' to run it, bypassing any permission errors
         subprocess.Popen(["bash", script_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
         messagebox.showinfo("Restarted", "The background daemon has been restarted!")
 
     def stop_daemon(self):
-        subprocess.run(["pkill", "-f", "bin/mouse-switcher"])
+        # Add the $ here
+        subprocess.run(["pkill", "-f", "bin/mouse-switcher$"])
         messagebox.showinfo("Stopped", "The background daemon has been stopped.")
+
+    def remove_override(self):
+        state_file = os.path.expanduser("~/.config/mouse-switcher/active.state")
+        with open(state_file, "w") as sf:
+            sf.write("Resuming Auto-Switch...")
+            
+        script_path = os.path.expanduser("~/.local/bin/mouse-switcher")
+        
+        # Add the $ here
+        subprocess.run(["pkill", "-f", "bin/mouse-switcher$"])
+        time.sleep(0.5)
+        subprocess.Popen(["bash", script_path], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
     app = MouseSwitcherApp()

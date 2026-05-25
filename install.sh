@@ -13,61 +13,49 @@ mkdir -p "$BIN_DIR"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$APP_DIR"
 
-# 2. Install Executables
+# 2. Install Executables (Pulling from src/)
 echo "⚙️ Installing core scripts..."
-cp mouse-switcher "$BIN_DIR/"
-cp mouse-map "$BIN_DIR/"
-cp mouse-switcher-gui.py "$BIN_DIR/"
+cp src/daemon/mouse-switcher "$BIN_DIR/"
+cp src/daemon/mouse-map "$BIN_DIR/"
+# We drop the .py extension during install for a cleaner CLI experience!
+cp src/gui/main.py "$BIN_DIR/mouse-switcher-gui"
 
-# Ensure they are executable
 chmod +x "$BIN_DIR/mouse-switcher"
 chmod +x "$BIN_DIR/mouse-map"
-chmod +x "$BIN_DIR/mouse-switcher-gui.py"
+chmod +x "$BIN_DIR/mouse-switcher-gui"
 
 # 3. Install Config & Assets
 echo "🎨 Installing configuration and assets..."
 
-# Safely copy profiles.conf ONLY if it doesn't exist yet
 if [ ! -f "$CONFIG_DIR/profiles.conf" ]; then
-    cp profiles.conf "$CONFIG_DIR/"
+    cp config/profiles.conf "$CONFIG_DIR/"
     echo "   -> Copied default profiles.conf"
 else
     echo "   -> Existing profiles.conf found, skipping to preserve settings."
 fi
 
-# Copy the hidden .icon.png and rename it to standard icon.png 
-if [ -f ".icon.png" ]; then
-    cp .icon.png "$CONFIG_DIR/icon.png"
-    echo "   -> Installed application icon"
-fi
+# Pulling from the new assets folder
+cp assets/icon.png "$CONFIG_DIR/icon.png"
+echo "   -> Installed application icon"
 
 # 4. Setup Python Virtual Environment
 echo "🐍 Setting up isolated Python environment..."
-# Create the venv silently
 python3 -m venv "$CONFIG_DIR/venv"
-# Install the UI theme into the venv safely
 "$CONFIG_DIR/venv/bin/pip" install --quiet sv-ttk
 echo "   -> UI theme installed successfully"
 
 # 5. Create the Desktop Launcher
 echo "🚀 Creating desktop shortcut..."
-cat <<EOF > "$APP_DIR/mouse-switcher.desktop"
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Mouse Switcher
-Comment=Auto-switch mouse profiles based on active window
-Exec=$CONFIG_DIR/venv/bin/python $BIN_DIR/mouse-switcher-gui.py
-Icon=$CONFIG_DIR/icon.png
-Terminal=false
-Categories=Utility;Settings;HardwareSettings;
-EOF
+# We can now just copy the template from assets, and use `sed` to inject the paths!
+cat assets/mouse-switcher.desktop \
+    | sed "s|{{PYTHON_EXEC}}|$CONFIG_DIR/venv/bin/python|g" \
+    | sed "s|{{GUI_EXEC}}|$BIN_DIR/mouse-switcher-gui|g" \
+    | sed "s|{{ICON_PATH}}|$CONFIG_DIR/icon.png|g" \
+    > "$APP_DIR/mouse-switcher.desktop"
 
-# Update the desktop database so your app launcher sees it immediately
 if command -v update-desktop-database &> /dev/null; then
     update-desktop-database "$APP_DIR"
 fi
 
 echo ""
 echo "✅ Installation Complete!"
-echo "You can now launch 'Mouse Switcher' directly from your application menu."

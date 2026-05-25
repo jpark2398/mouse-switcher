@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Mouse Switcher
+Comment=Auto-switch mouse profiles based on active window
+Exec={{PYTHON_EXEC}} {{GUI_EXEC}}
+Icon={{ICON_PATH}}
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
