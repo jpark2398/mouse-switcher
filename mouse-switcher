@@ -1,0 +1,179 @@
+#!/bin/bash
+
+exec > "$HOME/.mouse-switcher.log" 2>&1
+echo "=== Mouse Switcher Started at $(date) ==="
+echo "Detected Session: $XDG_SESSION_TYPE / $XDG_CURRENT_DESKTOP"
+
+CONFIG_FILE="$HOME/.config/mouse-switcher/profiles.conf"
+PRESET_DIR="$HOME/.config/input-remapper-2/presets"
+sleep 3
+last_preset="Booting"
+
+declare -A DEVICE_MAP
+TARGET_PRESET=""
+
+# --- 1. ENVIRONMENT-AWARE WINDOW DETECTION ---
+get_active_window_class() {
+    if [ "$XDG_CURRENT_DESKTOP" == "KDE" ] && [ "$XDG_SESSION_TYPE" == "wayland" ] && command -v kdotool >/dev/null; then
+        kdotool getactivewindow getwindowclassname 2>/dev/null
+    
+    elif [ "$XDG_CURRENT_DESKTOP" == "Hyprland" ] && command -v hyprctl >/dev/null; then
+        # Extract class name from Hyprland JSON output natively using awk
+        hyprctl activewindow -j 2>/dev/null | awk -F'"' '/"class":/ {print $4}'
+        
+    elif command -v xdotool >/dev/null; then
+        # Standard X11 (and XWayland fallback)
+        xdotool getactivewindow getwindowclassname 2>/dev/null
+    fi
+}
+
+# --- 2. CONFIG & SYNC LOGIC ---
+get_config() {
+    local target_window="$1"
+    local default_preset=""
+    local current_section=""
+    
+    DEVICE_MAP=()
+    TARGET_PRESET=""
+
+    while IFS='=' read -r key val; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        if [[ "$key" =~ ^\[(.*)\]$ ]]; then
+            current_section="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        key=$(echo "$key" | xargs)
+        val=$(echo "$val" | xargs)
+
+        if [ "$current_section" == "Devices" ]; then
+            DEVICE_MAP["$key"]="$val"
+        elif [ "$current_section" == "Mappings" ]; then
+            if [ "$key" == "$target_window" ]; then
+                TARGET_PRESET="$val"
+            elif [ "$key" == "default" ] && [ -z "$TARGET_PRESET" ]; then
+                default_preset="$val"
+            fi
+        fi
+    done < "$CONFIG_FILE"
+
+    TARGET_PRESET="${TARGET_PRESET:-$default_preset}"
+}
+
+sync_preset() {
+    local preset="$1"
+    local newest_file=""
+    local newest_dev=""
+    local newest_hash=""
+    local newest_time=0
+
+    for dev in "${!DEVICE_MAP[@]}"; do
+        local check_file="$PRESET_DIR/$dev/$preset.json"
+        if [ -f "$check_file" ]; then
+            local mtime=$(stat -c %Y "$check_file")
+            if [ "$mtime" -gt "$newest_time" ]; then
+                newest_time=$mtime
+                newest_file=$check_file
+                newest_dev=$dev
+                newest_hash=${DEVICE_MAP[$dev]}
+            fi
+        fi
+    done
+
+    if [ -n "$newest_file" ]; then
+        for target_dev in "${!DEVICE_MAP[@]}"; do
+            if [ "$target_dev" != "$newest_dev" ]; then
+                local target_file="$PRESET_DIR/$target_dev/$preset.json"
+                local target_hash="${DEVICE_MAP[$target_dev]}"
+                
+                mkdir -p "$PRESET_DIR/$target_dev"
+                
+                if [ ! -f "$target_file" ] || [ "$newest_file" -nt "$target_file" ]; then
+                    cp "$newest_file" "$target_file"
+                    sed -i "s/$newest_hash/$target_hash/g" "$target_file"
+                    echo "Synced $preset: $newest_dev -> $target_dev"
+                fi
+            fi
+        done
+    fi
+}
+
+apply_profile() {
+    local preset="$1"
+
+    if [ ${#DEVICE_MAP[@]} -gt 1 ]; then
+        sync_preset "$preset"
+    fi
+
+    local connected_devices
+    connected_devices=$(input-remapper-control --list-devices)
+
+    for dev in "${!DEVICE_MAP[@]}"; do
+        if echo "$connected_devices" | grep -qF "$dev"; then
+            input-remapper-control --command start --device "$dev" --preset "$preset" > /dev/null 2>&1 && last_preset="$preset"
+            break
+        fi
+    done
+}
+
+trigger_check() {
+    local window_name
+    local preset
+
+    window_name=$(get_active_window_class)
+
+    if [ -f "$CONFIG_FILE" ]; then
+        get_config "$window_name"
+        preset="$TARGET_PRESET"
+    else
+        preset="Default"
+    fi
+
+    preset="${preset:-Default}"
+
+    # Only fire if the window name isn't empty and the preset actually changed
+    if [ -n "$window_name" ] && [ "$last_preset" != "$preset" ]; then
+        echo "Profile update event ($preset): $window_name"
+        apply_profile "$preset"
+    fi
+}
+
+# --- 3. ENVIRONMENT-AWARE EVENT LISTENER ---
+# Instead of hardcoding dbus-monitor, we use the native watcher for the current desktop
+watch_window_events() {
+    if [ "$XDG_CURRENT_DESKTOP" == "KDE" ] && [ "$XDG_SESSION_TYPE" == "wayland" ]; then
+        echo "Using KDE Wayland D-Bus watcher..."
+        dbus-monitor --session "type='signal',member='RunningApplicationsChanged'" | \
+        while read -r line; do
+            sleep 0.2
+            trigger_check
+        done
+
+    elif [ "$XDG_CURRENT_DESKTOP" == "Hyprland" ] && command -v socat >/dev/null; then
+        echo "Using Hyprland socket watcher..."
+        socat -U - UNIX-CONNECT:"$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock" | \
+        while read -r line; do
+            if [[ "$line" == activewindow* ]]; then
+                trigger_check
+            fi
+        done
+
+    elif [ "$XDG_SESSION_TYPE" == "x11" ] || command -v xprop >/dev/null; then
+        echo "Using X11 xprop watcher..."
+        xprop -root -spy _NET_ACTIVE_WINDOW | \
+        while read -r line; do
+            trigger_check
+        done
+
+    else
+        echo "No native event watcher found. Falling back to 1-second polling loop..."
+        while true; do
+            trigger_check
+            sleep 1
+        done
+    fi
+}
+
+# Run initial check, then start the appropriate event loop
+trigger_check
+watch_window_events
