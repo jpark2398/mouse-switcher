@@ -1,0 +1,64 @@
+#!/bin/bash
+
+CONFIG_FILE="$HOME/.config/mouse-switcher/profiles.conf"
+
+echo "🖱️  Mouse Profile Switcher - Map New Game"
+echo "----------------------------------------"
+echo "When you press Enter, you will have 3 seconds to click on your game window."
+read -p "Press Enter when ready..."
+
+for i in {3..1}; do
+    echo -ne "Capturing in $i...\r"
+    sleep 1
+done
+echo "Capturing now!      "
+
+WINDOW_CLASS=$(kdotool getactivewindow getwindowclassname 2>/dev/null)
+WINDOW_NAME=$(kdotool getactivewindow getwindowname 2>/dev/null)
+
+if [ -z "$WINDOW_CLASS" ]; then
+    echo "❌ Error: Could not detect an active window."
+    exit 1
+fi
+
+echo ""
+echo "✅ Window Detected!"
+echo "   Name:  $WINDOW_NAME"
+echo "   Class: $WINDOW_CLASS"
+echo ""
+
+read -p "Enter the exact Input Remapper preset name for this game: " PRESET_NAME
+
+if [ -z "$PRESET_NAME" ]; then
+    echo "❌ Error: Preset name cannot be empty. Aborting."
+    exit 1
+fi
+
+mkdir -p "$(dirname "$CONFIG_FILE")"
+touch "$CONFIG_FILE"
+
+# Make sure [Mappings] header exists
+if ! grep -q "^\[Mappings\]" "$CONFIG_FILE"; then
+    echo "" >> "$CONFIG_FILE"
+    echo "[Mappings]" >> "$CONFIG_FILE"
+fi
+
+if grep -q "^$WINDOW_CLASS=" "$CONFIG_FILE"; then
+    echo ""
+    echo "⚠️  A mapping for '$WINDOW_CLASS' already exists."
+    read -p "Do you want to overwrite it? (y/n): " overwrite
+    if [[ $overwrite =~ ^[Yy]$ ]]; then
+        # Replace the existing line
+        sed -i "s/^$WINDOW_CLASS=.*/$WINDOW_CLASS=$PRESET_NAME/" "$CONFIG_FILE"
+        echo "✅ Updated mapping: $WINDOW_CLASS -> $PRESET_NAME"
+    else
+        echo "Aborted."
+        exit 0
+    fi
+else
+    # Append to the end of the file (which naturally falls under [Mappings])
+    echo "$WINDOW_CLASS=$PRESET_NAME" >> "$CONFIG_FILE"
+    echo "✅ Added mapping: $WINDOW_CLASS -> $PRESET_NAME"
+fi
+
+echo "🎉 Done! Your mouse will now switch instantly."
