@@ -131,7 +131,10 @@ trigger_check() {
 
     preset="${preset:-Default}"
 
-    # Only fire if the window name isn't empty and the preset actually changed
+    # --- NEW: Always keep the GUI file in sync, even if the window is empty! ---
+    echo "$preset" > "$HOME/.config/mouse-switcher/active.state"
+
+    # Only fire the heavy input-remapper switch if the window name actually exists
     if [ -n "$window_name" ] && [ "$last_preset" != "$preset" ]; then
         echo "Profile update event ($preset): $window_name"
         apply_profile "$preset"
