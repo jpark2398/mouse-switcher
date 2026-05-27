@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CONFIG_FILE="$HOME/.config/mouse-switcher/profiles.conf"
+CONFIG_FILE="$HOME/.config/mouse-switcher/profiles.json"
 
 echo "🖱️  Mouse Profile Switcher - Map New Game"
 echo "----------------------------------------"
@@ -34,31 +34,51 @@ if [ -z "$PRESET_NAME" ]; then
     exit 1
 fi
 
-mkdir -p "$(dirname "$CONFIG_FILE")"
-touch "$CONFIG_FILE"
-
-# Make sure [Mappings] header exists
-if ! grep -q "^\[Mappings\]" "$CONFIG_FILE"; then
-    echo "" >> "$CONFIG_FILE"
-    echo "[Mappings]" >> "$CONFIG_FILE"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "❌ Error: $CONFIG_FILE not found. Please run the GUI once to generate it."
+    exit 1
 fi
 
-if grep -q "^$WINDOW_CLASS=" "$CONFIG_FILE"; then
-    echo ""
-    echo "⚠️  A mapping for '$WINDOW_CLASS' already exists."
-    read -p "Do you want to overwrite it? (y/n): " overwrite
-    if [[ $overwrite =~ ^[Yy]$ ]]; then
-        # Replace the existing line
-        sed -i "s/^$WINDOW_CLASS=.*/$WINDOW_CLASS=$PRESET_NAME/" "$CONFIG_FILE"
-        echo "✅ Updated mapping: $WINDOW_CLASS -> $PRESET_NAME"
-    else
-        echo "Aborted."
-        exit 0
-    fi
-else
-    # Append to the end of the file (which naturally falls under [Mappings])
-    echo "$WINDOW_CLASS=$PRESET_NAME" >> "$CONFIG_FILE"
+# Use inline python to safely append the window class to the array format
+python3 -c "
+import json, sys
+config_file = sys.argv[1]
+win_class = sys.argv[2]
+preset = sys.argv[3]
+
+with open(config_file, 'r') as f:
+    data = json.load(f)
+
+# Modify the first available sync group
+groups = list(data.get('sync_groups', {}).keys())
+if not groups:
+    sys.exit(1)
+
+active_group = groups[0]
+mappings = data['sync_groups'][active_group].setdefault('mappings', {})
+
+# Remove the window class if it exists in another preset array
+for p_name, windows in mappings.items():
+    if win_class in windows:
+        windows.remove(win_class)
+
+# Add to the new preset
+if preset not in mappings:
+    mappings[preset] = []
+    
+if win_class not in mappings[preset]:
+    mappings[preset].append(win_class)
+
+# Clean up empty arrays to keep JSON tidy
+data['sync_groups'][active_group]['mappings'] = {k: v for k, v in mappings.items() if v}
+
+with open(config_file, 'w') as f:
+    json.dump(data, f, indent=4)
+" "$CONFIG_FILE" "$WINDOW_CLASS" "$PRESET_NAME"
+
+if [ $? -eq 0 ]; then
     echo "✅ Added mapping: $WINDOW_CLASS -> $PRESET_NAME"
+    echo "🎉 Done! Your mouse will now switch instantly."
+else
+    echo "❌ Error modifying $CONFIG_FILE"
 fi
-
-echo "🎉 Done! Your mouse will now switch instantly."
