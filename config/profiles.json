@@ -1,0 +1,16 @@
+{
+  "sync_groups": {
+    "Desktop Gaming": {
+      "devices": {
+        "Razer Naga Pro": "22d9461abf9df813a2ed84574e0413b7",
+        "Razer Razer Naga Pro": "8e402f11bb8a0d6311e73bf791c551b1"
+      },
+      "mappings": {
+        "default": "Default",
+        "steam_app_1808500": "Arc",
+        "steam_app_2399830": "Ark",
+        "steam_app_3241660": "REPO"
+      }
+    }
+  }
+}
