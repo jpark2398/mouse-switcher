@@ -27,14 +27,14 @@ chmod +x "$BIN_DIR/mouse-switcher-gui"
 # 3. Install Config & Assets
 echo "🎨 Installing configuration and assets..."
 
-if [ ! -f "$CONFIG_DIR/profiles.conf" ]; then
-    cp config/profiles.conf "$CONFIG_DIR/"
-    echo "   -> Copied default profiles.conf"
+# UPDATED: Now looking for profiles.json
+if [ ! -f "$CONFIG_DIR/profiles.json" ]; then
+    cp config/profiles.json "$CONFIG_DIR/"
+    echo "   -> Copied default profiles.json"
 else
-    echo "   -> Existing profiles.conf found, skipping to preserve settings."
+    echo "   -> Existing profiles.json found, skipping to preserve settings."
 fi
 
-# Pulling from the new assets folder
 cp assets/icon.png "$CONFIG_DIR/icon.png"
 echo "   -> Installed application icon"
 
@@ -46,7 +46,6 @@ echo "   -> UI theme installed successfully"
 
 # 5. Create the Desktop Launcher
 echo "🚀 Creating desktop shortcut..."
-# We can now just copy the template from assets, and use `sed` to inject the paths!
 cat assets/mouse-switcher.desktop \
     | sed "s|{{PYTHON_EXEC}}|$CONFIG_DIR/venv/bin/python|g" \
     | sed "s|{{GUI_EXEC}}|$BIN_DIR/mouse-switcher-gui|g" \
