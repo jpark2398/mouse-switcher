@@ -27,7 +27,6 @@ chmod +x "$BIN_DIR/mouse-switcher-gui"
 # 3. Install Config & Assets
 echo "🎨 Installing configuration and assets..."
 
-# UPDATED: Now looking for profiles.json
 if [ ! -f "$CONFIG_DIR/profiles.json" ]; then
     cp config/profiles.json "$CONFIG_DIR/"
     echo "   -> Copied default profiles.json"
