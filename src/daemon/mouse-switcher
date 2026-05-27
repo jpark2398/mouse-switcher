@@ -4,7 +4,7 @@ exec > "$HOME/.mouse-switcher.log" 2>&1
 echo "=== Mouse Switcher Started at $(date) ==="
 echo "Detected Session: $XDG_SESSION_TYPE / $XDG_CURRENT_DESKTOP"
 
-CONFIG_FILE="$HOME/.config/mouse-switcher/profiles.conf"
+CONFIG_FILE="$HOME/.config/mouse-switcher/profiles.json"
 PRESET_DIR="$HOME/.config/input-remapper-2/presets"
 sleep 3
 last_preset="Booting"
@@ -18,11 +18,9 @@ get_active_window_class() {
         kdotool getactivewindow getwindowclassname 2>/dev/null
     
     elif [ "$XDG_CURRENT_DESKTOP" == "Hyprland" ] && command -v hyprctl >/dev/null; then
-        # Extract class name from Hyprland JSON output natively using awk
         hyprctl activewindow -j 2>/dev/null | awk -F'"' '/"class":/ {print $4}'
         
     elif command -v xdotool >/dev/null; then
-        # Standard X11 (and XWayland fallback)
         xdotool getactivewindow getwindowclassname 2>/dev/null
     fi
 }
@@ -30,34 +28,52 @@ get_active_window_class() {
 # --- 2. CONFIG & SYNC LOGIC ---
 get_config() {
     local target_window="$1"
-    local default_preset=""
-    local current_section=""
-    
-    DEVICE_MAP=()
     TARGET_PRESET=""
+    DEVICE_MAP=()
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return
+    fi
 
-    while IFS='=' read -r key val; do
-        [[ -z "$key" || "$key" == \#* ]] && continue
-        if [[ "$key" =~ ^\[(.*)\]$ ]]; then
-            current_section="${BASH_REMATCH[1]}"
-            continue
-        fi
+    # 1. Safely find the Sync Group that maps this window
+    local active_group
+    active_group=$(jq -r --arg win "$target_window" '
+        .sync_groups | to_entries[]? | 
+        select(.value.mappings | to_entries[]? | select(.value | type == "array" and index($win))) | 
+        .key
+    ' "$CONFIG_FILE" | head -n 1)
 
-        key=$(echo "$key" | xargs)
-        val=$(echo "$val" | xargs)
+    # 2. Fallback to the first Sync Group if the window is unmapped
+    if [ -z "$active_group" ] || [ "$active_group" == "null" ]; then
+        active_group=$(jq -r '.sync_groups | keys_unsorted[0]' "$CONFIG_FILE")
+    fi
 
-        if [ "$current_section" == "Devices" ]; then
-            DEVICE_MAP["$key"]="$val"
-        elif [ "$current_section" == "Mappings" ]; then
-            if [ "$key" == "$target_window" ]; then
-                TARGET_PRESET="$val"
-            elif [ "$key" == "default" ] && [ -z "$TARGET_PRESET" ]; then
-                default_preset="$val"
-            fi
-        fi
-    done < "$CONFIG_FILE"
+    if [ -z "$active_group" ] || [ "$active_group" == "null" ]; then
+        return
+    fi
 
-    TARGET_PRESET="${TARGET_PRESET:-$default_preset}"
+    # 3. Extract devices
+    while IFS="=" read -r dev hash; do
+        [[ -n "$dev" ]] && DEVICE_MAP["$dev"]="$hash"
+    done < <(jq -r --arg grp "$active_group" '.sync_groups[$grp].devices | to_entries[]? | "\(.key)=\(.value)"' "$CONFIG_FILE")
+
+    # 4. Resolve the Target Preset
+    TARGET_PRESET=$(jq -r --arg win "$target_window" --arg grp "$active_group" '
+        .sync_groups[$grp].mappings | to_entries[]? | 
+        select(.value | type == "array" and index($win)) | 
+        .key
+    ' "$CONFIG_FILE" | head -n 1)
+
+    # 5. Fallback to default mapping
+    if [ -z "$TARGET_PRESET" ] || [ "$TARGET_PRESET" == "null" ]; then
+        TARGET_PRESET=$(jq -r --arg grp "$active_group" '
+            .sync_groups[$grp].mappings | to_entries[]? | 
+            select(.value | type == "array" and index("default")) | 
+            .key
+        ' "$CONFIG_FILE" | head -n 1)
+    fi
+
+    TARGET_PRESET="${TARGET_PRESET:-Default}"
 }
 
 sync_preset() {
@@ -110,17 +126,24 @@ apply_profile() {
 
     for dev in "${!DEVICE_MAP[@]}"; do
         if echo "$connected_devices" | grep -qF "$dev"; then
-            input-remapper-control --command start --device "$dev" --preset "$preset" > /dev/null 2>&1 && last_preset="$preset"
-            break
+            input-remapper-control --command start --device "$dev" --preset "$preset" > /dev/null 2>&1
         fi
     done
+    
+    last_preset="$preset"
 }
 
 trigger_check() {
+    # Check if manual override is active
+    if grep -q "(Manual)" "$HOME/.config/mouse-switcher/active.state" 2>/dev/null; then
+        last_preset="MANUAL_OVERRIDE"
+        return
+    fi
+
     local window_name
     local preset
 
-    window_name=$(get_active_window_class)
+    window_name=$(get_active_window_class | tr -d '\n')
 
     if [ -f "$CONFIG_FILE" ]; then
         get_config "$window_name"
@@ -131,18 +154,15 @@ trigger_check() {
 
     preset="${preset:-Default}"
 
-    # --- NEW: Always keep the GUI file in sync, even if the window is empty! ---
-    echo "$preset" > "$HOME/.config/mouse-switcher/active.state"
-
-    # Only fire the heavy input-remapper switch if the window name actually exists
-    if [ -n "$window_name" ] && [ "$last_preset" != "$preset" ]; then
+    # Only fire the switch if the profile actually changed
+    if [ "$last_preset" != "$preset" ]; then
+        echo "$preset" > "$HOME/.config/mouse-switcher/active.state"
         echo "Profile update event ($preset): $window_name"
         apply_profile "$preset"
     fi
 }
 
 # --- 3. ENVIRONMENT-AWARE EVENT LISTENER ---
-# Instead of hardcoding dbus-monitor, we use the native watcher for the current desktop
 watch_window_events() {
     if [ "$XDG_CURRENT_DESKTOP" == "KDE" ] && [ "$XDG_SESSION_TYPE" == "wayland" ]; then
         echo "Using KDE Wayland D-Bus watcher..."
@@ -177,6 +197,5 @@ watch_window_events() {
     fi
 }
 
-# Run initial check, then start the appropriate event loop
 trigger_check
 watch_window_events

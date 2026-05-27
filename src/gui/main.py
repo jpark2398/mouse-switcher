@@ -16,7 +16,7 @@ class MouseSwitcherApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Mouse Profile Switcher")
-        self.geometry("850x650")
+        self.geometry("900x650")
         sv_ttk.set_theme("dark")
 
         icon_path = os.path.expanduser("~/.config/mouse-switcher/icon.png")
@@ -46,7 +46,7 @@ class MouseSwitcherApp(tk.Tk):
                 "sync_groups": {
                     "Desktop Gaming": {
                         "devices": {},
-                        "mappings": {"default": "Default"}
+                        "mappings": {"Default": ["default"]}
                     }
                 }
             }
@@ -55,6 +55,26 @@ class MouseSwitcherApp(tk.Tk):
             try:
                 with open(CONFIG_FILE, 'r') as f:
                     self.config = json.load(f)
+                    
+                # Schema Migration (legacy check)
+                needs_save = False
+                for group_name, group_data in self.config.get("sync_groups", {}).items():
+                    mappings = group_data.get("mappings", {})
+                    new_mappings = {}
+                    for k, v in mappings.items():
+                        if isinstance(v, str):  # Old Format
+                            needs_save = True
+                            if v not in new_mappings:
+                                new_mappings[v] = []
+                            new_mappings[v].append(k)
+                        elif isinstance(v, list): # New Format
+                            new_mappings[k] = v
+                    if needs_save:
+                        group_data["mappings"] = new_mappings
+                        
+                if needs_save:
+                    self.save_config()
+                    
             except json.JSONDecodeError:
                 messagebox.showerror("Error", "profiles.json is corrupt. Backing up and resetting.")
                 os.rename(CONFIG_FILE, CONFIG_FILE + ".bak")
@@ -82,14 +102,12 @@ class MouseSwitcherApp(tk.Tk):
 
         # 2. Footer (Status Bar at the Bottom)
         footer_frame = ttk.Frame(self)
-        # Pack this BEFORE the notebook so it sticks to the absolute bottom
         footer_frame.pack(side="bottom", fill="x", padx=20, pady=(0, 15))
 
         # Bottom Left: Active Profile
         self.active_badge = ttk.Label(footer_frame, text="🎯 Active: Scanning...", font=("", 12, "bold"), foreground="#0078d4")
         self.active_badge.pack(side="left")
 
-        # We create the override button, but don't pack it until it's needed
         self.remove_override_btn = ttk.Button(footer_frame, text="❌ Remove Override", command=self.remove_override)
 
         # Bottom Right: Service Status
@@ -98,13 +116,11 @@ class MouseSwitcherApp(tk.Tk):
 
         # 3. Main Notebook (Tabs)
         self.notebook = ttk.Notebook(self)
-        # Now the notebook expands to fill the space between header and footer
         self.notebook.pack(side="top", fill="both", expand=True, padx=20, pady=(0, 15))
 
-        # 4. Build Tabs
-        self.build_mappings_tab()
-        self.build_devices_tab()
+        # 4. Build Tabs (Now merged down to 3 tabs)
         self.build_editor_tab()
+        self.build_devices_tab()
         self.build_logs_tab()
 
     def update_group_dropdown(self):
@@ -112,7 +128,6 @@ class MouseSwitcherApp(tk.Tk):
         self.group_combo['values'] = groups
         
         if groups:
-            # Set to current or fallback to first
             if self.group_var.get() not in groups:
                 self.group_var.set(groups[0])
         else:
@@ -122,45 +137,171 @@ class MouseSwitcherApp(tk.Tk):
 
     def on_group_changed(self, event=None):
         """Fired when the global Sync Group is changed."""
-        self.refresh_mappings_list()
         self.refresh_devices_list()
         self.refresh_editor_dropdown()
 
-    # --- TAB 1: MAPPINGS ---
-    def build_mappings_tab(self):
+    # --- TAB 1: PROFILE EDITOR & MAPPINGS ---
+    def build_editor_tab(self):
         frame = ttk.Frame(self.notebook, padding=15)
-        self.notebook.add(frame, text=" Game Mappings ")
+        self.notebook.add(frame, text=" 🎮 Profile Editor ")
 
-        ttk.Label(frame, text="Mappings listed here apply ONLY to the globally selected Sync Group.", foreground="gray").pack(anchor="w", pady=(0, 10))
+        self.current_preset_data = []
+        self.current_json_path = ""
+        self.selected_hw_id = ""
+        self.selected_btn_name = ""
+        self.NAGA_MAP = {str(i): i+1 for i in range(1, 13)}
 
-        columns = ("Window Class", "Preset Name")
-        self.map_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
-        self.map_tree.heading("Window Class", text="Window Class")
-        self.map_tree.heading("Preset Name", text="Preset Name")
-        self.map_tree.column("Window Class", width=350)
-        self.map_tree.column("Preset Name", width=250)
-        self.map_tree.pack(fill="both", expand=True, pady=(0, 15))
+        # TOP ROW: Preset Selector & Global Controls
+        preset_row = ttk.Frame(frame)
+        preset_row.pack(fill="x", pady=(0, 20))
 
-        controls = ttk.Frame(frame)
-        controls.pack(fill="x")
-
-        self.capture_btn = ttk.Button(controls, text="🎯 Capture Active Window", style="Accent.TButton", command=self.capture_window)
-        self.capture_btn.pack(side="left", padx=(0, 10))
+        ttk.Label(preset_row, text="Target Profile:", font=("", 10, "bold")).pack(side="left", padx=(0, 10))
         
-        ttk.Button(controls, text="🗑️ Delete Selected", command=self.delete_mapping).pack(side="right")
+        self.preset_combo = ttk.Combobox(preset_row, state="readonly", width=25)
+        self.preset_combo.pack(side="left", padx=(0, 10))
+        self.preset_combo.bind("<<ComboboxSelected>>", self.load_preset_json)
 
-    def refresh_mappings_list(self):
-        for item in self.map_tree.get_children():
-            self.map_tree.delete(item)
-            
+        ttk.Button(preset_row, text="➕ New Profile", command=self.create_new_preset).pack(side="left")
+        ttk.Button(preset_row, text="🗑️ Delete Profile", command=self.delete_profile).pack(side="left", padx=(10, 0))
+        ttk.Button(preset_row, text="🚀 Apply Now", command=self.manual_apply_profile).pack(side="right")
+
+        # MAIN CONTENT SPLIT (3 Columns)
+        split_frame = ttk.Frame(frame)
+        split_frame.pack(fill="both", expand=True)
+
+        # 1. Left Column: MMO Grid
+        grid_frame = ttk.LabelFrame(split_frame, text=" MMO Side Panel ", padding=15)
+        grid_frame.pack(side="left", fill="y", padx=(0, 15))
+
+        self.grid_buttons = {}
+        btn_count = 1
+        for row in range(4):
+            for col in range(3):
+                btn_name = str(btn_count)
+                hw_id = self.NAGA_MAP.get(btn_name)
+                
+                btn = tk.Button(
+                    grid_frame, text=btn_name, width=6, height=2, relief="flat", bd=0, highlightthickness=2, justify="center", font=("", 10, "bold"), cursor="hand2"
+                )
+                btn.config(command=lambda n=btn_name, h=hw_id: self.select_grid_button(n, h))
+                btn.grid(row=row, column=col, padx=4, pady=4)
+                
+                self.grid_buttons[btn_name] = btn
+                btn_count += 1
+
+        # 2. Middle Column: Keybind Configurator
+        config_frame = ttk.Frame(split_frame)
+        config_frame.pack(side="left", fill="both", expand=True, padx=(0, 15))
+
+        self.btn_label = ttk.Label(config_frame, text="Select a button on the grid...", font=("", 11, "bold"))
+        self.btn_label.pack(anchor="w", pady=(0, 15))
+
+        ttk.Label(config_frame, text="Output Action:").pack(anchor="w")
+        self.action_entry = ttk.Entry(config_frame)
+        self.action_entry.pack(fill="x", pady=(0, 5))
+        
+        self.listen_btn = ttk.Button(config_frame, text="🟢 Listen for Keystroke", style="Accent.TButton", command=self.start_listen)
+        self.listen_btn.pack(anchor="w", pady=(0, 15))
+
+        ttk.Button(config_frame, text="💾 Save to JSON", command=self.save_preset_json).pack(anchor="w")
+
+        # 3. Right Column: Linked Windows Array
+        win_frame = ttk.LabelFrame(split_frame, text=" Windows Linked to Profile ", padding=15)
+        win_frame.pack(side="left", fill="both", expand=True)
+
+        self.win_tree = ttk.Treeview(win_frame, columns=("Class",), show="headings", height=8)
+        self.win_tree.heading("Class", text="Window Class")
+        self.win_tree.pack(fill="both", expand=True, pady=(0, 10))
+
+        controls = ttk.Frame(win_frame)
+        controls.pack(fill="x")
+        
+        self.capture_btn = ttk.Button(controls, text="🎯 Capture", command=self.capture_window_to_selected)
+        self.capture_btn.pack(side="left", padx=(0, 5))
+        ttk.Button(controls, text="➕ Add", command=self.add_window_manual).pack(side="left", padx=(0, 5))
+        ttk.Button(controls, text="🗑️ Remove", command=self.delete_window).pack(side="right")
+
+    def refresh_editor_dropdown(self):
         active_group = self.group_var.get()
         if not active_group: return
         
         mappings = self.config["sync_groups"].get(active_group, {}).get("mappings", {})
-        for win_class, preset in mappings.items():
-            self.map_tree.insert("", tk.END, values=(win_class, preset))
+        presets = sorted(list(mappings.keys()))
+        
+        self.preset_combo['values'] = presets
+        
+        current = self.preset_combo.get()
+        if current in presets:
+            self.preset_combo.set(current)
+        elif presets:
+            self.preset_combo.set(presets[0])
+        else:
+            self.preset_combo.set("")
+            self.current_preset_data = []
+            self.refresh_grid_visuals()
+            self.refresh_linked_windows()
+            return
+            
+        self.load_preset_json()
 
-    def capture_window(self):
+    def create_new_preset(self):
+        active_group = self.group_var.get()
+        if not active_group:
+            messagebox.showwarning("No Group", "Please select a Sync Group first.")
+            return
+
+        preset = simpledialog.askstring("New Profile", "Enter the input-remapper profile name:")
+        if preset:
+            preset = preset.strip()
+            if not preset: return
+            
+            mappings = self.config["sync_groups"][active_group]["mappings"]
+            if preset not in mappings:
+                mappings[preset] = []
+                self.save_config()
+                self.refresh_editor_dropdown()
+                self.preset_combo.set(preset)
+                self.load_preset_json()
+            else:
+                messagebox.showinfo("Info", "A profile with this name already exists in this group.")
+
+    def delete_profile(self):
+        preset = self.preset_combo.get()
+        if not preset: return
+        
+        if preset.lower() == 'default':
+            messagebox.showwarning("Warning", "You cannot delete the Default fallback profile.")
+            return
+            
+        if messagebox.askyesno("Confirm", f"Remove the profile '{preset}' and unbind all its windows from this Sync Group?"):
+            active_group = self.group_var.get()
+            mappings = self.config["sync_groups"][active_group]["mappings"]
+            
+            if preset in mappings:
+                del mappings[preset]
+                self.save_config()
+                self.refresh_editor_dropdown()
+
+    def refresh_linked_windows(self):
+        for item in self.win_tree.get_children():
+            self.win_tree.delete(item)
+            
+        active_group = self.group_var.get()
+        preset = self.preset_combo.get()
+        if not active_group or not preset: return
+        
+        mappings = self.config["sync_groups"].get(active_group, {}).get("mappings", {})
+        windows = mappings.get(preset, [])
+        
+        for win_class in windows:
+            self.win_tree.insert("", tk.END, values=(win_class,))
+
+    def capture_window_to_selected(self):
+        preset = self.preset_combo.get()
+        if not preset:
+            messagebox.showwarning("Selection Required", "Please select a target profile first.")
+            return
+
         if not self.group_var.get():
             messagebox.showwarning("No Group", "Please select a Sync Group first.")
             return
@@ -178,47 +319,203 @@ class MouseSwitcherApp(tk.Tk):
             try:
                 cmd = "kdotool getactivewindow getwindowclassname" if "wayland" in os.environ.get("WAYLAND_DISPLAY", "").lower() or subprocess.run("command -v kdotool", shell=True, capture_output=True).returncode == 0 else "xdotool getactivewindow getwindowclassname"
                 win_class = subprocess.check_output(cmd, shell=True, text=True).strip()
-                self.after(0, self.prompt_preset, win_class)
+                self.after(0, self.apply_captured_window, preset, win_class)
             except Exception as e:
                 self.after(0, messagebox.showerror, "Capture Failed", f"Could not detect window.\n{e}")
             finally:
-                self.after(0, lambda: self.capture_btn.config(text="🎯 Capture Active Window", state="normal"))
+                self.after(0, lambda: self.capture_btn.config(text="🎯 Capture", state="normal"))
 
         threading.Thread(target=capture_thread, daemon=True).start()
 
-    def prompt_preset(self, win_class):
+    def apply_captured_window(self, preset, win_class):
         if not win_class: return
         
-        preset = simpledialog.askstring("Preset Name", f"Detected Window: {win_class}\n\nEnter the input-remapper preset name:")
-        if preset:
-            active_group = self.group_var.get()
-            self.config["sync_groups"][active_group]["mappings"][win_class] = preset
-            self.save_config()
-            self.refresh_mappings_list()
-            self.refresh_editor_dropdown()
+        active_group = self.group_var.get()
+        mappings = self.config["sync_groups"][active_group]["mappings"]
+        
+        # Safely remove this window from any other presets to avoid conflicts
+        for p_name, windows in list(mappings.items()):
+            if win_class in windows:
+                windows.remove(win_class)
 
-    def delete_mapping(self):
-        selected = self.map_tree.selection()
+        if preset not in mappings:
+            mappings[preset] = []
+        if win_class not in mappings[preset]:
+            mappings[preset].append(win_class)
+            
+        self.save_config()
+        self.refresh_linked_windows()
+        messagebox.showinfo("Success", f"Linked window '{win_class}' to profile '{preset}'.")
+
+    def add_window_manual(self):
+        preset = self.preset_combo.get()
+        if not preset:
+            messagebox.showwarning("Selection Required", "Please select a target profile first.")
+            return
+            
+        win_class = simpledialog.askstring("Add Window", f"Enter the Window Class to add to '{preset}':")
+        if win_class:
+            win_class = win_class.strip()
+            if not win_class: return
+            self.apply_captured_window(preset, win_class)
+
+    def delete_window(self):
+        preset = self.preset_combo.get()
+        if not preset: return
+        
+        selected = self.win_tree.selection()
         if not selected: return
         
-        item = self.map_tree.item(selected[0])
-        win_class = item['values'][0]
+        item = self.win_tree.item(selected[0])
+        win_class = str(item['values'][0])
         
-        if win_class == 'default':
-            messagebox.showwarning("Warning", "You shouldn't delete the default fallback profile!")
+        if preset.lower() == 'default' and win_class.lower() == 'default':
+            messagebox.showwarning("Warning", "You shouldn't delete the default fallback window!")
             return
 
         active_group = self.group_var.get()
-        del self.config["sync_groups"][active_group]["mappings"][win_class]
+        mappings = self.config["sync_groups"][active_group]["mappings"]
+        
+        if preset in mappings and win_class in mappings[preset]:
+            mappings[preset].remove(win_class)
+                
         self.save_config()
-        self.refresh_mappings_list()
+        self.refresh_linked_windows()
 
-    # --- TAB 2: DEVICES ---
+    # --- INPUT-REMAPPER JSON LOGIC ---
+    def load_preset_json(self, event=None):
+        preset_name = self.preset_combo.get()
+        active_group = self.group_var.get()
+        
+        # Always refresh the windows tree immediately
+        self.refresh_linked_windows()
+        
+        if not preset_name or not active_group: return
+
+        devices = self.config["sync_groups"][active_group].get("devices", {})
+        if not devices: return
+        
+        target_device = list(devices.keys())[0]
+        self.current_origin_hash = devices[target_device]
+        self.current_json_path = os.path.expanduser(f"~/.config/input-remapper-2/presets/{target_device}/{preset_name}.json")
+
+        if os.path.exists(self.current_json_path):
+            with open(self.current_json_path, 'r') as f:
+                data = json.load(f)
+                self.current_preset_data = data if isinstance(data, list) else []
+        else:
+            self.current_preset_data = []
+
+        if self.selected_hw_id:
+            self.select_grid_button(self.selected_btn_name, self.selected_hw_id)
+        self.refresh_grid_visuals()
+
+    def format_key_label(self, action_string):
+        clean = action_string.replace("key(", "").replace("macro(", "").replace(")", "").replace("KEY_", "")
+        replacements = {"LEFTCTRL": "CTRL", "LEFTSHIFT": "SHIFT", "LEFTMETA": "WIN", "SPACE": "SPC", "ENTER": "ENT", ", ": "+"}
+        for old, new in replacements.items(): clean = clean.replace(old, new)
+        return clean
+
+    def refresh_grid_visuals(self):
+        mapped_codes = {}
+        for mapping in self.current_preset_data:
+            for combo in mapping.get("input_combination", []):
+                if combo.get("type") == 1:
+                    mapped_codes[combo.get("code")] = mapping.get("output_symbol", "Mapped")
+
+        for btn_name, btn in self.grid_buttons.items():
+            hw_id = self.NAGA_MAP.get(btn_name)
+            is_selected = getattr(self, 'selected_btn_name', "") == btn_name
+            outline_color = "#0078d4" if is_selected else ("#1e5c2b" if hw_id in mapped_codes else "#2b2b2b")
+
+            if hw_id in mapped_codes:
+                display_action = self.format_key_label(mapped_codes[hw_id])[:7]
+                btn.config(text=f"{btn_name}\n[{display_action}]", bg="#2b2b2b", fg="#ffffff", highlightbackground=outline_color, highlightcolor=outline_color)
+            else:
+                btn.config(text=f"{btn_name}\n ", bg="#2b2b2b", fg="#666666", highlightbackground=outline_color, highlightcolor=outline_color)
+
+    def select_grid_button(self, btn_name, hw_id):
+        self.selected_btn_name = btn_name
+        self.selected_hw_id = hw_id
+        self.btn_label.config(text=f"Button {btn_name} (Hardware Code: {hw_id})")
+        self.action_entry.delete(0, tk.END)
+        self.refresh_grid_visuals()
+        
+        for mapping in self.current_preset_data:
+            for combo in mapping.get("input_combination", []):
+                if combo.get("type") == 1 and combo.get("code") == hw_id:
+                    self.action_entry.insert(0, mapping.get("output_symbol", ""))
+                    return
+
+    def start_listen(self):
+        self.listen_btn.config(text="Press any key...", state="disabled")
+        self.bind("<KeyPress>", self.capture_key)
+
+    def capture_key(self, event):
+        self.unbind("<KeyPress>")
+        key_sym = event.keysym.upper()
+        special_keys = {"SPACE": "KEY_SPACE", "RETURN": "KEY_ENTER", "ESCAPE": "KEY_ESC"}
+        out_key = special_keys.get(key_sym, f"KEY_{key_sym}")
+        
+        self.action_entry.delete(0, tk.END)
+        self.action_entry.insert(0, f"key({out_key})")
+        self.listen_btn.config(text="🟢 Listen for Keystroke", state="normal")
+
+    def save_preset_json(self):
+        if not self.selected_hw_id or not self.current_json_path: return messagebox.showwarning("Error", "Select a preset and a button.")
+        new_action = self.action_entry.get().strip()
+        
+        for i in range(len(self.current_preset_data) - 1, -1, -1):
+            mapping = self.current_preset_data[i]
+            new_combos = [c for c in mapping.get("input_combination", []) if not (c.get("type") == 1 and c.get("code") == self.selected_hw_id)]
+            if not new_combos: del self.current_preset_data[i]
+            else: mapping["input_combination"] = new_combos
+
+        if new_action:
+            self.current_preset_data.append({
+                "input_combination": [{"type": 1, "code": self.selected_hw_id, "origin_hash": getattr(self, 'current_origin_hash', "")}],
+                "target_uinput": "keyboard",
+                "output_symbol": new_action,
+                "mapping_type": "key_macro",
+                "name": f"Button {self.selected_btn_name}"
+            })
+
+        os.makedirs(os.path.dirname(self.current_json_path), exist_ok=True)
+        with open(self.current_json_path, 'w') as f: json.dump(self.current_preset_data, f, indent=4)
+        self.refresh_grid_visuals()
+        messagebox.showinfo("Saved", f"Profile '{self.preset_combo.get()}' updated!")
+
+    def manual_apply_profile(self):
+        preset = self.preset_combo.get()
+        active_group = self.group_var.get()
+        if not preset or not active_group: return
+        
+        devices = self.config["sync_groups"][active_group].get("devices", {})
+        if not devices: return messagebox.showwarning("No Devices", "No devices in this Sync Group.")
+
+        def apply_thread():
+            success = False
+            for dev in devices.keys():
+                try:
+                    subprocess.run(["input-remapper-control", "--command", "start", "--device", dev, "--preset", preset], check=True, capture_output=True)
+                    success = True
+                except subprocess.CalledProcessError: pass
+            
+            if success:
+                with open(os.path.expanduser("~/.config/mouse-switcher/active.state"), "w") as sf:
+                    sf.write(f"{preset} (Manual)")
+                self.after(0, messagebox.showinfo, "Success", f"Profile '{preset}' injected!")
+            else:
+                self.after(0, messagebox.showerror, "Error", "Failed to apply profile. Are devices plugged in?")
+
+        threading.Thread(target=apply_thread, daemon=True).start()
+
+
+    # --- TAB 2: DEVICES & SYNC ---
     def build_devices_tab(self):
         frame = ttk.Frame(self.notebook, padding=15)
         self.notebook.add(frame, text=" Devices & Sync ")
 
-        # Create Treeview to act as Folders
         self.dev_tree = ttk.Treeview(frame, columns=("Hash",), show="tree headings", height=10)
         self.dev_tree.heading("#0", text="Sync Group / Device Name")
         self.dev_tree.heading("Hash", text="Hardware Hash (MD5)")
@@ -230,6 +527,8 @@ class MouseSwitcherApp(tk.Tk):
         controls.pack(fill="x")
         
         ttk.Button(controls, text="➕ New Sync Group", command=self.create_sync_group).pack(side="left", padx=(0, 10))
+        ttk.Button(controls, text="✏️ Rename Group", command=self.rename_sync_group).pack(side="left", padx=(0, 10))
+        
         self.scan_btn = ttk.Button(controls, text="🔍 Add Device to Active Group", style="Accent.TButton", command=self.scan_devices)
         self.scan_btn.pack(side="left", padx=(0, 10))
         
@@ -239,11 +538,14 @@ class MouseSwitcherApp(tk.Tk):
         for item in self.dev_tree.get_children():
             self.dev_tree.delete(item)
             
-        for group_name, group_data in self.config.get("sync_groups", {}).items():
-            # Insert Folder
-            group_id = self.dev_tree.insert("", "end", text=f"📂 {group_name}", open=True, tags=("group", group_name))
+        active_group_name = self.group_var.get()
             
-            # Insert Devices
+        for group_name, group_data in self.config.get("sync_groups", {}).items():
+            is_active = (group_name == active_group_name)
+            display_text = f"📂 {group_name} (Active)" if is_active else f"📂 {group_name}"
+            
+            group_id = self.dev_tree.insert("", "end", text=display_text, open=True, tags=("group", group_name))
+            
             for dev_name, dev_hash in group_data.get("devices", {}).items():
                 self.dev_tree.insert(group_id, "end", text=dev_name, values=(dev_hash,), tags=("device", group_name, dev_name))
 
@@ -254,11 +556,45 @@ class MouseSwitcherApp(tk.Tk):
                 messagebox.showerror("Error", "Group already exists.")
                 return
                 
-            self.config["sync_groups"][name] = {"devices": {}, "mappings": {"default": "Default"}}
+            self.config["sync_groups"][name] = {"devices": {}, "mappings": {"Default": ["default"]}}
             self.save_config()
             self.update_group_dropdown()
             self.group_var.set(name)
             self.on_group_changed()
+
+    def rename_sync_group(self):
+        selected = self.dev_tree.selection()
+        if not selected:
+            messagebox.showwarning("Selection Required", "Please select a Sync Group to rename.")
+            return
+
+        item_tags = self.dev_tree.item(selected[0], "tags")
+        if not item_tags or item_tags[0] != "group":
+            messagebox.showwarning("Invalid Selection", "Please select a Sync Group folder, not a device.")
+            return
+
+        old_name = item_tags[1]
+        new_name = simpledialog.askstring("Rename Group", f"Enter a new name for '{old_name}':", initialvalue=old_name)
+        
+        if new_name and new_name != old_name:
+            if new_name in self.config["sync_groups"]:
+                messagebox.showerror("Error", "A group with this name already exists.")
+                return
+            
+            new_groups = {}
+            for k, v in self.config["sync_groups"].items():
+                if k == old_name:
+                    new_groups[new_name] = v
+                else:
+                    new_groups[k] = v
+            self.config["sync_groups"] = new_groups
+            self.save_config()
+            
+            if self.group_var.get() == old_name:
+                self.group_var.set(new_name)
+                
+            self.update_group_dropdown()
+            self.refresh_devices_list()
 
     def delete_device_or_group(self):
         selected = self.dev_tree.selection()
@@ -358,205 +694,7 @@ print(json.dumps(devices))
         ttk.Button(controls, text="Add Device", style="Accent.TButton", command=on_add).pack(side="right", padx=10)
         ttk.Button(controls, text="Cancel", command=popup.destroy).pack(side="right")
 
-    # --- TAB 3: PROFILE EDITOR (3x4 MMO GRID) ---
-    def build_editor_tab(self):
-        frame = ttk.Frame(self.notebook, padding=15)
-        self.notebook.add(frame, text=" 🎮 Profile Editor ")
-
-        self.current_preset_data = []
-        self.current_json_path = ""
-        self.selected_hw_id = ""
-        self.selected_btn_name = ""
-
-        self.NAGA_MAP = {str(i): i+1 for i in range(1, 13)}
-
-        # Grid
-        grid_frame = ttk.LabelFrame(frame, text=" MMO Side Panel ", padding=20)
-        grid_frame.pack(side="left", fill="y", padx=(0, 20))
-
-        self.grid_buttons = {}
-        btn_count = 1
-        for row in range(4):
-            for col in range(3):
-                btn_name = str(btn_count)
-                hw_id = self.NAGA_MAP.get(btn_name)
-                
-                btn = tk.Button(
-                    grid_frame, text=btn_name, width=8, height=3, relief="flat", bd=0, highlightthickness=2, justify="center", font=("", 10, "bold"), cursor="hand2"
-                )
-                btn.config(command=lambda n=btn_name, h=hw_id: self.select_grid_button(n, h))
-                btn.grid(row=row, column=col, padx=4, pady=4)
-                
-                self.grid_buttons[btn_name] = btn
-                btn_count += 1
-
-        # Configurator
-        config_frame = ttk.Frame(frame)
-        config_frame.pack(side="left", fill="both", expand=True)
-
-        ttk.Label(config_frame, text="Target Preset:", foreground="gray").pack(anchor="w")
-        preset_row = ttk.Frame(config_frame)
-        preset_row.pack(fill="x", pady=(0, 20))
-
-        self.preset_combo = ttk.Combobox(preset_row, state="readonly")
-        self.preset_combo.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.preset_combo.bind("<<ComboboxSelected>>", self.load_preset_json)
-
-        ttk.Button(preset_row, text="🚀 Apply Now", command=self.manual_apply_profile).pack(side="right")
-
-        self.btn_label = ttk.Label(config_frame, text="Select a button on the grid...", font=("", 12, "bold"))
-        self.btn_label.pack(anchor="w", pady=(0, 20))
-
-        ttk.Label(config_frame, text="Output Action:").pack(anchor="w")
-        self.action_entry = ttk.Entry(config_frame)
-        self.action_entry.pack(fill="x", pady=(0, 5))
-        
-        self.listen_btn = ttk.Button(config_frame, text="🟢 Listen for Keystroke", style="Accent.TButton", command=self.start_listen)
-        self.listen_btn.pack(anchor="w", pady=(0, 20))
-
-        ttk.Button(config_frame, text="💾 Save to JSON", command=self.save_preset_json).pack(side="bottom", anchor="e")
-
-    def refresh_editor_dropdown(self):
-        active_group = self.group_var.get()
-        if not active_group: return
-        
-        mappings = self.config["sync_groups"].get(active_group, {}).get("mappings", {})
-        presets = sorted(list(set(mappings.values())))
-        
-        self.preset_combo['values'] = presets
-        if presets:
-            self.preset_combo.set(presets[0])
-            self.load_preset_json()
-        else:
-            self.preset_combo.set("")
-            self.current_preset_data = []
-            self.refresh_grid_visuals()
-
-    def format_key_label(self, action_string):
-        clean = action_string.replace("key(", "").replace("macro(", "").replace(")", "").replace("KEY_", "")
-        replacements = {"LEFTCTRL": "CTRL", "LEFTSHIFT": "SHIFT", "LEFTMETA": "WIN", "SPACE": "SPC", "ENTER": "ENT", ", ": "+"}
-        for old, new in replacements.items(): clean = clean.replace(old, new)
-        return clean
-
-    def refresh_grid_visuals(self):
-        mapped_codes = {}
-        for mapping in self.current_preset_data:
-            for combo in mapping.get("input_combination", []):
-                if combo.get("type") == 1:
-                    mapped_codes[combo.get("code")] = mapping.get("output_symbol", "Mapped")
-
-        for btn_name, btn in self.grid_buttons.items():
-            hw_id = self.NAGA_MAP.get(btn_name)
-            is_selected = getattr(self, 'selected_btn_name', "") == btn_name
-            outline_color = "#0078d4" if is_selected else ("#1e5c2b" if hw_id in mapped_codes else "#2b2b2b")
-
-            if hw_id in mapped_codes:
-                display_action = self.format_key_label(mapped_codes[hw_id])[:7]
-                btn.config(text=f"{btn_name}\n[{display_action}]", bg="#2b2b2b", fg="#ffffff", highlightbackground=outline_color, highlightcolor=outline_color)
-            else:
-                btn.config(text=f"{btn_name}\n ", bg="#2b2b2b", fg="#666666", highlightbackground=outline_color, highlightcolor=outline_color)
-
-    def load_preset_json(self, event=None):
-        preset_name = self.preset_combo.get()
-        active_group = self.group_var.get()
-        
-        if not preset_name or not active_group: return
-
-        devices = self.config["sync_groups"][active_group].get("devices", {})
-        if not devices: return
-        
-        target_device = list(devices.keys())[0]
-        self.current_origin_hash = devices[target_device]
-        self.current_json_path = os.path.expanduser(f"~/.config/input-remapper-2/presets/{target_device}/{preset_name}.json")
-
-        if os.path.exists(self.current_json_path):
-            with open(self.current_json_path, 'r') as f:
-                data = json.load(f)
-                self.current_preset_data = data if isinstance(data, list) else []
-        else:
-            self.current_preset_data = []
-
-        if self.selected_hw_id:
-            self.select_grid_button(self.selected_btn_name, self.selected_hw_id)
-        self.refresh_grid_visuals()
-
-    def select_grid_button(self, btn_name, hw_id):
-        self.selected_btn_name = btn_name
-        self.selected_hw_id = hw_id
-        self.btn_label.config(text=f"Button {btn_name} (Hardware Code: {hw_id})")
-        self.action_entry.delete(0, tk.END)
-        self.refresh_grid_visuals()
-        
-        for mapping in self.current_preset_data:
-            for combo in mapping.get("input_combination", []):
-                if combo.get("type") == 1 and combo.get("code") == hw_id:
-                    self.action_entry.insert(0, mapping.get("output_symbol", ""))
-                    return
-
-    def start_listen(self):
-        self.listen_btn.config(text="Press any key...", state="disabled")
-        self.bind("<KeyPress>", self.capture_key)
-
-    def capture_key(self, event):
-        self.unbind("<KeyPress>")
-        key_sym = event.keysym.upper()
-        special_keys = {"SPACE": "KEY_SPACE", "RETURN": "KEY_ENTER", "ESCAPE": "KEY_ESC"}
-        out_key = special_keys.get(key_sym, f"KEY_{key_sym}")
-        
-        self.action_entry.delete(0, tk.END)
-        self.action_entry.insert(0, f"key({out_key})")
-        self.listen_btn.config(text="🟢 Listen for Keystroke", state="normal")
-
-    def save_preset_json(self):
-        if not self.selected_hw_id or not self.current_json_path: return messagebox.showwarning("Error", "Select a preset and a button.")
-        new_action = self.action_entry.get().strip()
-        
-        for i in range(len(self.current_preset_data) - 1, -1, -1):
-            mapping = self.current_preset_data[i]
-            new_combos = [c for c in mapping.get("input_combination", []) if not (c.get("type") == 1 and c.get("code") == self.selected_hw_id)]
-            if not new_combos: del self.current_preset_data[i]
-            else: mapping["input_combination"] = new_combos
-
-        if new_action:
-            self.current_preset_data.append({
-                "input_combination": [{"type": 1, "code": self.selected_hw_id, "origin_hash": getattr(self, 'current_origin_hash', "")}],
-                "target_uinput": "keyboard",
-                "output_symbol": new_action,
-                "mapping_type": "key_macro",
-                "name": f"Button {self.selected_btn_name}"
-            })
-
-        os.makedirs(os.path.dirname(self.current_json_path), exist_ok=True)
-        with open(self.current_json_path, 'w') as f: json.dump(self.current_preset_data, f, indent=4)
-        self.refresh_grid_visuals()
-        messagebox.showinfo("Saved", f"Profile '{self.preset_combo.get()}' updated!")
-
-    def manual_apply_profile(self):
-        preset = self.preset_combo.get()
-        active_group = self.group_var.get()
-        if not preset or not active_group: return
-        
-        devices = self.config["sync_groups"][active_group].get("devices", {})
-        if not devices: return messagebox.showwarning("No Devices", "No devices in this Sync Group.")
-
-        def apply_thread():
-            success = False
-            for dev in devices.keys():
-                try:
-                    subprocess.run(["input-remapper-control", "--command", "start", "--device", dev, "--preset", preset], check=True, capture_output=True)
-                    success = True
-                except subprocess.CalledProcessError: pass
-            
-            if success:
-                with open(os.path.expanduser("~/.config/mouse-switcher/active.state"), "w") as sf:
-                    sf.write(f"{preset} (Manual)")
-                self.after(0, messagebox.showinfo, "Success", f"Profile '{preset}' injected!")
-            else:
-                self.after(0, messagebox.showerror, "Error", "Failed to apply profile. Are devices plugged in?")
-
-        threading.Thread(target=apply_thread, daemon=True).start()
-
-    # --- TAB 4: DAEMON & LOGS ---
+    # --- TAB 3: DAEMON & LOGS ---
     def build_logs_tab(self):
         frame = ttk.Frame(self.notebook, padding=15)
         self.notebook.add(frame, text=" Daemon Status ")
@@ -588,7 +726,6 @@ print(json.dumps(devices))
                 with open(state_file, "r") as sf: active_preset = sf.read().strip()
                 self.active_badge.config(text=f"🎯 Active: {active_preset}")
                 
-                # Pop the override button next to the active badge on the bottom left
                 if "(Manual)" in active_preset and not self.remove_override_btn.winfo_ismapped():
                     self.remove_override_btn.pack(side="left", padx=(15, 0))
                 elif "(Manual)" not in active_preset and self.remove_override_btn.winfo_ismapped():
@@ -613,7 +750,7 @@ print(json.dumps(devices))
 
     def remove_override(self):
         with open(os.path.expanduser("~/.config/mouse-switcher/active.state"), "w") as sf:
-            sf.write("Resuming Auto-Switch...")
+            sf.write("Resuming Auto-Switch")
         self.restart_daemon()
 
 if __name__ == "__main__":
