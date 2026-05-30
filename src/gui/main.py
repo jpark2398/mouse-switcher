@@ -411,9 +411,16 @@ class MouseSwitcherApp(tk.Tk):
         self.refresh_grid_visuals()
 
     def format_key_label(self, action_string):
-        clean = action_string.replace("key(", "").replace("macro(", "").replace(")", "").replace("KEY_", "")
-        replacements = {"LEFTCTRL": "CTRL", "LEFTSHIFT": "SHIFT", "LEFTMETA": "WIN", "SPACE": "SPC", "ENTER": "ENT", ", ": "+"}
-        for old, new in replacements.items(): clean = clean.replace(old, new)
+        clean = action_string
+        # Clean up the new Tkinter keysym names for the visual grid
+        replacements = {
+            "Control_L": "CTRL", "Control_R": "CTRL",
+            "Shift_L": "SHIFT", "Shift_R": "SHIFT",
+            "Alt_L": "ALT", "Alt_R": "ALT",
+            "space": "SPC", "Return": "ENT", "Escape": "ESC"
+        }
+        for old, new in replacements.items(): 
+            clean = clean.replace(old, new)
         return clean
 
     def refresh_grid_visuals(self):
@@ -453,12 +460,12 @@ class MouseSwitcherApp(tk.Tk):
 
     def capture_key(self, event):
         self.unbind("<KeyPress>")
-        key_sym = event.keysym.upper()
-        special_keys = {"SPACE": "KEY_SPACE", "RETURN": "KEY_ENTER", "ESCAPE": "KEY_ESC"}
-        out_key = special_keys.get(key_sym, f"KEY_{key_sym}")
+        
+        # event.keysym grabs the exact, case-sensitive key name (e.g., 'Control_L', 'M', 'space')
+        key_sym = event.keysym
         
         self.action_entry.delete(0, tk.END)
-        self.action_entry.insert(0, f"key({out_key})")
+        self.action_entry.insert(0, key_sym)
         self.listen_btn.config(text="🟢 Listen for Keystroke", state="normal")
 
     def save_preset_json(self):
