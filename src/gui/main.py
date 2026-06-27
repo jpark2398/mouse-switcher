@@ -481,7 +481,7 @@ class MouseSwitcherApp(tk.Tk):
         if new_action:
             self.current_preset_data.append({
                 "input_combination": [{"type": 1, "code": self.selected_hw_id, "origin_hash": getattr(self, 'current_origin_hash', "")}],
-                "target_uinput": "keyboard",
+                "target_uinput": "keyboard,mouse",
                 "output_symbol": new_action,
                 "mapping_type": "key_macro",
                 "name": f"Button {self.selected_btn_name}"
