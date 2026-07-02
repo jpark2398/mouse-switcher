@@ -55,8 +55,7 @@ get_config() {
     # 3. Extract devices
     while IFS="=" read -r dev hash; do
         [[ -n "$dev" ]] && DEVICE_MAP["$dev"]="$hash"
-    done < <(jq -r --arg grp "$active_group" '.sync_groups[$grp].devices | to_entries[]? | "\(.key)=\(.value)"' "$CONFIG_FILE")
-
+    done < <(jq -r --arg grp "$active_group" '.sync_groups[$grp].devices | to_entries[]? | "\(.value.dev_name)=\(.value.hash)"' "$CONFIG_FILE")
     # 4. Resolve the Target Preset
     TARGET_PRESET=$(jq -r --arg win "$target_window" --arg grp "$active_group" '
         .sync_groups[$grp].mappings | to_entries[]? | 
@@ -114,19 +113,51 @@ sync_preset() {
     fi
 }
 
+inject_hash_into_preset() {
+    local preset_path="$1"
+    local new_hash="$2"
+
+    # Use jq to update the nested origin_hash in all elements of the JSON array
+    if [[ -f "$preset_path" ]]; then
+        jq --arg hash "$new_hash" \
+           'map(.input_combination[].origin_hash = $hash)' \
+           "$preset_path" > "${preset_path}.tmp" && mv "${preset_path}.tmp" "$preset_path"
+    fi
+}
+
 apply_profile() {
     local preset="$1"
+    
+    # 1. Get current physical hardware IDs from lsusb
+    # This outputs lines like: Bus 003 Device 004: ID 1532:00a7 Razer USA, Ltd
+    local connected_usb_ids
+    connected_usb_ids=$(lsusb | awk -F 'ID ' '{print $2}' | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
 
-    if [ ${#DEVICE_MAP[@]} -gt 1 ]; then
-        sync_preset "$preset"
-    fi
+    # 2. Get the active group
+    local active_group
+    active_group=$(jq -r '.sync_groups | keys[0]' "$CONFIG_FILE")
 
-    local connected_devices
-    connected_devices=$(input-remapper-control --list-devices)
+    # 3. Iterate over devices defined in this group
+    mapfile -t devices < <(jq -r --arg grp "$active_group" \
+        '.sync_groups[$grp].devices | to_entries[] | "\(.key)|\(.value.dev_name)|\(.value.hash)"' \
+        "$CONFIG_FILE")
 
-    for dev in "${!DEVICE_MAP[@]}"; do
-        if echo "$connected_devices" | grep -qF "$dev"; then
-            input-remapper-control --command start --device "$dev" --preset "$preset" > /dev/null 2>&1
+    for entry in "${devices[@]}"; do
+        IFS="|" read -r vid_pid dev_name dev_hash <<< "$entry"
+        
+        # 4. Filter by physical VID:PID match
+        if echo "$connected_usb_ids" | grep -q "$vid_pid"; then
+            local preset_path="$HOME/.config/input-remapper-2/presets/$dev_name/$preset.json"
+
+            if [[ -f "$preset_path" ]]; then
+                # Inject the hash (using the function from before)
+                inject_hash_into_preset "$preset_path" "$dev_hash"
+
+                # Apply the profile
+                input-remapper-control --command start --device "$dev_name" --preset "$preset" > /dev/null 2>&1
+            fi
+        else
+            echo "[DEBUG] Device $dev_name (VID:PID $vid_pid) not found via lsusb. Skipping."
         fi
     done
     

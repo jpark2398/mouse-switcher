@@ -395,8 +395,11 @@ class MouseSwitcherApp(tk.Tk):
         devices = self.config["sync_groups"][active_group].get("devices", {})
         if not devices: return
         
-        target_device = list(devices.keys())[0]
-        self.current_origin_hash = devices[target_device]
+        first_vid = list(devices.keys())[0]
+        target_device = devices[first_vid].get("dev_name", "")
+        
+        # We extract the hash out of the dictionary now
+        self.current_origin_hash = devices[first_vid].get("hash", "")
         self.current_json_path = os.path.expanduser(f"~/.config/input-remapper-2/presets/{target_device}/{preset_name}.json")
 
         if os.path.exists(self.current_json_path):
@@ -498,22 +501,88 @@ class MouseSwitcherApp(tk.Tk):
         if not preset or not active_group: return
         
         devices = self.config["sync_groups"][active_group].get("devices", {})
-        if not devices: return messagebox.showwarning("No Devices", "No devices in this Sync Group.")
+        if not devices: 
+            return messagebox.showwarning("No Devices", "No devices in this Sync Group.")
 
         def apply_thread():
-            success = False
-            for dev in devices.keys():
-                try:
-                    subprocess.run(["input-remapper-control", "--command", "start", "--device", dev, "--preset", preset], check=True, capture_output=True)
-                    success = True
-                except subprocess.CalledProcessError: pass
+            connected_vid_pids = set()
             
+            # 1. Bulletproof check for connected hardware via /proc (No root required)
+            try:
+                with open("/proc/bus/input/devices", "r") as f:
+                    for line in f:
+                        if line.startswith("I:"):
+                            # Example line: I: Bus=0003 Vendor=1532 Product=00b9 Version=0111
+                            parts = line.split()
+                            vendor = "0000"
+                            product = "0000"
+                            for part in parts:
+                                if part.startswith("Vendor="):
+                                    vendor = part.split("=")[1].lower()
+                                elif part.startswith("Product="):
+                                    product = part.split("=")[1].lower()
+                            connected_vid_pids.add(f"{vendor}:{product}")
+            except Exception as e:
+                print(f"Error reading input devices: {e}")
+
+            print(f"\n[DEBUG] Physically plugged in VID:PIDs: {connected_vid_pids}")
+
+            success = False
+            
+            # 2. Iterate over our saved devices in the group
+            for vid_pid, dev_info in devices.items():
+                print(f"[DEBUG] Checking your saved device: {vid_pid}...")
+                
+                # Skip if the device is not physically plugged in right now
+                if vid_pid not in connected_vid_pids:
+                    print(f"[DEBUG] --> {vid_pid} is NOT plugged in right now. Skipping.")
+                    continue
+
+                print(f"[DEBUG] --> {vid_pid} IS plugged in! Injecting and applying...")
+                dev_name = dev_info.get("dev_name", "")
+                dev_hash = dev_info.get("hash", "")
+                
+                preset_path = os.path.expanduser(f"~/.config/input-remapper-2/presets/{dev_name}/{preset}.json")
+                
+                # 3. Inject the hash into the input-remapper preset JSON
+                if os.path.exists(preset_path):
+                    try:
+                        with open(preset_path, 'r') as f:
+                            preset_data = json.load(f)
+                        
+                        if isinstance(preset_data, list):
+                            for mapping in preset_data:
+                                if "input_combination" in mapping:
+                                    # Drill down into the combination list
+                                    for combination in mapping["input_combination"]:
+                                        combination["origin_hash"] = dev_hash
+                            
+                        with open(preset_path, 'w') as f:
+                            json.dump(preset_data, f, indent=4)
+
+                    except Exception as e:
+                        print(f"Failed to inject hash into {preset_path}: {e}")
+
+                # 4. Apply the preset using input-remapper-control
+                try:
+                    result = subprocess.run(
+                        ["input-remapper-control", "--command", "start", "--device", dev_name, "--preset", preset], 
+                        check=True, 
+                        capture_output=True,
+                        text=True
+                    )
+                    print(f"[DEBUG] Successfully applied profile to {dev_name}")
+                    success = True
+                except subprocess.CalledProcessError as e: 
+                    print(f"[DEBUG] input-remapper failed to apply: {e.stderr}")
+            
+            # 5. UI Updates
             if success:
                 with open(os.path.expanduser("~/.config/mouse-switcher/active.state"), "w") as sf:
                     sf.write(f"{preset} (Manual)")
-                self.after(0, messagebox.showinfo, "Success", f"Profile '{preset}' injected!")
+                self.after(0, messagebox.showinfo, "Success", f"Profile '{preset}' injected and applied!")
             else:
-                self.after(0, messagebox.showerror, "Error", "Failed to apply profile. Are devices plugged in?")
+                self.after(0, messagebox.showerror, "Error", "Failed to apply profile. Are the devices plugged in?")
 
         threading.Thread(target=apply_thread, daemon=True).start()
 
@@ -523,11 +592,19 @@ class MouseSwitcherApp(tk.Tk):
         frame = ttk.Frame(self.notebook, padding=15)
         self.notebook.add(frame, text=" Devices & Sync ")
 
-        self.dev_tree = ttk.Treeview(frame, columns=("Hash",), show="tree headings", height=10)
-        self.dev_tree.heading("#0", text="Sync Group / Device Name")
-        self.dev_tree.heading("Hash", text="Hardware Hash (MD5)")
-        self.dev_tree.column("#0", width=400)
-        self.dev_tree.column("Hash", width=300)
+        # Create multiple columns for the new data structure
+        self.dev_tree = ttk.Treeview(frame, columns=("DevName", "VidPid", "Hash"), show="tree headings", height=10)
+        
+        self.dev_tree.heading("#0", text="Sync Group / Friendly Name")
+        self.dev_tree.heading("DevName", text="System Name")
+        self.dev_tree.heading("VidPid", text="VID:PID")
+        self.dev_tree.heading("Hash", text="MD5 Hash")
+        
+        self.dev_tree.column("#0", width=250)
+        self.dev_tree.column("DevName", width=250)
+        self.dev_tree.column("VidPid", width=100, anchor="center")
+        self.dev_tree.column("Hash", width=250)
+        
         self.dev_tree.pack(fill="both", expand=True, pady=(0, 15))
 
         controls = ttk.Frame(frame)
@@ -535,6 +612,7 @@ class MouseSwitcherApp(tk.Tk):
         
         ttk.Button(controls, text="➕ New Sync Group", command=self.create_sync_group).pack(side="left", padx=(0, 10))
         ttk.Button(controls, text="✏️ Rename Group", command=self.rename_sync_group).pack(side="left", padx=(0, 10))
+        ttk.Button(controls, text="✏️ Rename Device", command=self.rename_device).pack(side="left", padx=(0, 10))
         
         self.scan_btn = ttk.Button(controls, text="🔍 Add Device to Active Group", style="Accent.TButton", command=self.scan_devices)
         self.scan_btn.pack(side="left", padx=(0, 10))
@@ -553,9 +631,18 @@ class MouseSwitcherApp(tk.Tk):
             
             group_id = self.dev_tree.insert("", "end", text=display_text, open=True, tags=("group", group_name))
             
-            for dev_name, dev_hash in group_data.get("devices", {}).items():
-                self.dev_tree.insert(group_id, "end", text=dev_name, values=(dev_hash,), tags=("device", group_name, dev_name))
-
+            # Now iterating over vid_pid
+            for vid_pid, dev_data in group_data.get("devices", {}).items():
+                friendly = dev_data.get("friendly_name", dev_data.get("dev_name", "Unknown"))
+                dev_name = dev_data.get("dev_name", "Unknown")
+                dev_hash = dev_data.get("hash", "unknown")
+                
+                self.dev_tree.insert(
+                    group_id, "end", text=f"🖱️ {friendly}", 
+                    values=(dev_name, vid_pid, dev_hash), 
+                    tags=("device", group_name, vid_pid) # Pass vid_pid as the tag
+                )
+                
     def create_sync_group(self):
         name = simpledialog.askstring("New Group", "Enter a name for the new Sync Group:")
         if name:
@@ -603,6 +690,25 @@ class MouseSwitcherApp(tk.Tk):
             self.update_group_dropdown()
             self.refresh_devices_list()
 
+    def rename_device(self):
+        selected = self.dev_tree.selection()
+        if not selected: return
+        
+        item_tags = self.dev_tree.item(selected[0], "tags")
+        if not item_tags or item_tags[0] != "device":
+            return messagebox.showwarning("Selection", "Select a device to rename.")
+            
+        group_name, dev_hash = item_tags[1], item_tags[2]
+        current_data = self.config["sync_groups"][group_name]["devices"][dev_hash]
+        current_name = current_data.get("friendly_name", "")
+        
+        new_name = simpledialog.askstring("Rename Device", "Enter a friendly name:", initialvalue=current_name)
+        if new_name is not None:
+            new_name = new_name.strip()
+            self.config["sync_groups"][group_name]["devices"][dev_hash]["friendly_name"] = new_name if new_name else current_data["dev_name"]
+            self.save_config()
+            self.refresh_devices_list()
+
     def delete_device_or_group(self):
         selected = self.dev_tree.selection()
         if not selected: return
@@ -621,8 +727,8 @@ class MouseSwitcherApp(tk.Tk):
                 self.update_group_dropdown()
                 
         elif item_tags[0] == "device":
-            group_name, dev_name = item_tags[1], item_tags[2]
-            del self.config["sync_groups"][group_name]["devices"][dev_name]
+            group_name, vid_pid = item_tags[1], item_tags[2]
+            del self.config["sync_groups"][group_name]["devices"][vid_pid]
             self.save_config()
             self.refresh_devices_list()
 
@@ -632,24 +738,60 @@ class MouseSwitcherApp(tk.Tk):
             messagebox.showwarning("No Group", "Please select or create a Sync Group first.")
             return
 
-        self.scan_btn.config(text="Waiting for Auth...", state="disabled")
-        self.update_idletasks()
+        self.scan_btn.config(state="disabled")
+        
+        self.wait_popup = tk.Toplevel(self)
+        self.wait_popup.title("Listening for Device...")
+        self.wait_popup.geometry("350x150")
+        self.wait_popup.transient(self)
+        self.wait_popup.grab_set()
+        
+        ttk.Label(self.wait_popup, text="🎮 Press any side button on your mouse now...", font=("", 10, "bold")).pack(expand=True)
+        ttk.Label(self.wait_popup, text="(Waiting up to 15 seconds)").pack(pady=(0, 10))
+        ttk.Button(self.wait_popup, text="Cancel", command=self.close_wait_popup_with_error).pack(pady=(0, 10))
 
-        payload = """import sys, json, hashlib
+        payload = """import sys, json, hashlib, select, time
 try:
     import evdev
 except ImportError:
     sys.exit(1)
 
+# Grab all physical devices, explicitly ignoring input-remapper virtual devices
 devices = {}
 for path in evdev.list_devices():
     try:
         dev = evdev.InputDevice(path)
-        phys = dev.phys.split("/")[0] if dev.phys else "-"
-        key = f"{dev.info.bustype}_{dev.info.vendor}_{dev.info.product}_{phys}"
-        devices[dev.name] = hashlib.md5(key.encode('utf-8')).hexdigest()
-    except: pass
-print(json.dumps(devices))
+        if "input-remapper" not in dev.name.lower():
+            devices[dev.fd] = dev
+    except Exception:
+        pass
+
+start = time.time()
+
+try:
+    while time.time() - start < 15:
+        r, w, x = select.select(devices.keys(), [], [], 1.0)
+        for fd in r:
+            dev = devices[fd]
+            for event in dev.read():
+                if event.type == evdev.ecodes.EV_KEY and event.value == 1:
+                    s = str(dev.capabilities(absinfo=False)) + dev.name
+                    dev_hash = hashlib.md5(s.encode('utf-8')).hexdigest().lower()
+                    
+                    vid_pid = f"{dev.info.vendor:04x}:{dev.info.product:04x}"
+                    
+                    data = {
+                        vid_pid: {
+                            "dev_name": dev.name,
+                            "friendly_name": dev.name,
+                            "hash": dev_hash
+                        }
+                    }
+                    print(json.dumps(data))
+                    sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
 """
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as f:
             f.write(payload)
@@ -657,49 +799,96 @@ print(json.dumps(devices))
 
         def execute_scan():
             try:
+                # Force input-remapper to drop its exclusive hardware locks
+                subprocess.run(["input-remapper-control", "--command", "stop-all"], capture_output=True)
+                
+                # Run the scanner payload now that the hardware is free
                 result = subprocess.run(["pkexec", "python3", temp_path], capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.after(0, self.prompt_device_selection, json.loads(result.stdout))
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    self.after(0, self.confirm_device_selection, json.loads(result.stdout))
                 else:
-                    self.after(0, messagebox.showerror, "Scan Failed", "Authentication cancelled or failed.")
+                    self.after(0, self.close_wait_popup_with_error)
             finally:
-                os.remove(temp_path)
-                self.after(0, lambda: self.scan_btn.config(text="🔍 Add Device to Active Group", state="normal"))
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                
+                # 1. Restore standard input-remapper autoload profiles (e.g., your main keyboard)
+                subprocess.run(["input-remapper-control", "--command", "autoload"], capture_output=True)
+                
+                self.after(0, lambda: self.scan_btn.config(state="normal"))
 
         threading.Thread(target=execute_scan, daemon=True).start()
 
-    def prompt_device_selection(self, devices):
-        if not devices: return messagebox.showinfo("No Devices", "No supported input devices found.")
-
-        popup = tk.Toplevel(self)
-        popup.title("Select Hardware")
-        popup.geometry("400x300")
-        popup.transient(self)
-        popup.grab_set()
-
-        ttk.Label(popup, text=f"Adding to: {self.group_var.get()}", font=("", 10, "bold")).pack(pady=10)
-        listbox = tk.Listbox(popup, bg="#2b2b2b", fg="#ffffff", selectbackground="#0078d4", font=("", 10))
-        listbox.pack(fill="both", expand=True, padx=10, pady=5)
-
-        device_names = list(devices.keys())
-        for name in device_names: listbox.insert(tk.END, name)
-
-        def on_add():
-            idx = listbox.curselection()
-            if not idx: return
-            dev_name = device_names[idx[0]]
-            dev_hash = devices[dev_name]
-
+    def confirm_device_selection(self, device_data):
+        if hasattr(self, 'wait_popup') and self.wait_popup.winfo_exists():
+            self.wait_popup.destroy()
+            
+        vid_pid = list(device_data.keys())[0]
+        dev_info = device_data[vid_pid]
+        new_dev_name = dev_info["dev_name"]
+        new_hash = dev_info["hash"]
+        
+        if messagebox.askyesno("Device Detected", f"Detected input from:\n\n{new_dev_name}\n\nAdd this device to '{self.group_var.get()}'?"):
             active_group = self.group_var.get()
-            self.config["sync_groups"][active_group]["devices"][dev_name] = dev_hash
+            existing_devices = self.config["sync_groups"][active_group].get("devices", {})
+            
+            # 1. Find an existing device in the group to act as the source template
+            source_dev_name = None
+            for existing_vid, existing_data in existing_devices.items():
+                if existing_vid != vid_pid:  # Don't copy from itself
+                    source_dev_name = existing_data.get("dev_name")
+                    break
+
+            # 2. Add the new device to our config
+            self.config["sync_groups"][active_group]["devices"][vid_pid] = dev_info
             self.save_config()
             self.refresh_devices_list()
-            popup.destroy()
+            
+            # 3. Perform the One-Time Profile Sync
+            if source_dev_name:
+                source_dir = os.path.expanduser(f"~/.config/input-remapper-2/presets/{source_dev_name}")
+                dest_dir = os.path.expanduser(f"~/.config/input-remapper-2/presets/{new_dev_name}")
+                
+                if os.path.exists(source_dir):
+                    os.makedirs(dest_dir, exist_ok=True)
+                    synced_count = 0
+                    
+                    for filename in os.listdir(source_dir):
+                        if filename.endswith(".json"):
+                            src_file = os.path.join(source_dir, filename)
+                            dest_file = os.path.join(dest_dir, filename)
+                            
+                            try:
+                                with open(src_file, 'r') as f:
+                                    preset_data = json.load(f)
+                                
+                                # Inject the newly scanned hash into the copied preset
+                                if isinstance(preset_data, list):
+                                    for mapping in preset_data:
+                                        if "input_combination" in mapping:
+                                            # Drill down into the combination list
+                                            for combination in mapping["input_combination"]:
+                                                combination["origin_hash"] = new_hash
+                                    
+                                with open(dest_file, 'w') as f:
+                                    json.dump(preset_data, f, indent=4)
+                                    
+                                synced_count += 1
+                            except Exception as e:
+                                print(f"Failed to sync {filename}: {e}")
+                                
+                    if synced_count > 0:
+                        print(f"Synced {synced_count} profiles from {source_dev_name} to {new_dev_name}")
 
-        controls = ttk.Frame(popup)
-        controls.pack(fill="x", pady=10)
-        ttk.Button(controls, text="Add Device", style="Accent.TButton", command=on_add).pack(side="right", padx=10)
-        ttk.Button(controls, text="Cancel", command=popup.destroy).pack(side="right")
+            # 4. Automatically remove overrides and restart daemon
+            if self.preset_combo.get():
+                self.remove_override()
+
+    def close_wait_popup_with_error(self):
+        if hasattr(self, 'wait_popup') and self.wait_popup.winfo_exists():
+            self.wait_popup.destroy()
+            messagebox.showwarning("Scan Finished", "No button press detected or authentication was cancelled.")
 
     # --- TAB 3: DAEMON & LOGS ---
     def build_logs_tab(self):
