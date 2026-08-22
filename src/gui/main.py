@@ -304,14 +304,31 @@ class MouseSwitcherApp(tk.Tk):
             messagebox.showwarning("Warning", "You cannot delete the Default fallback profile.")
             return
             
-        if messagebox.askyesno("Confirm", f"Remove the profile '{preset}' and unbind all its windows from this Sync Group?"):
+        if messagebox.askyesno("Confirm", f"Remove the profile '{preset}' and delete its preset files from all devices in this Sync Group?"):
             active_group = self.group_var.get()
-            mappings = self.config["sync_groups"][active_group]["mappings"]
+            group_data = self.config["sync_groups"].get(active_group, {})
+            mappings = group_data.get("mappings", {})
+            devices = group_data.get("devices", {})
             
+            # 1. Remove from config mappings
             if preset in mappings:
                 del mappings[preset]
                 self.save_config()
-                self.refresh_editor_dropdown()
+
+            # 2. Delete the actual .json files from input-remapper-2 directories
+            for vid_pid, dev_info in devices.items():
+                dev_name = dev_info.get("dev_name")
+                if dev_name:
+                    preset_file = os.path.expanduser(f"~/.config/input-remapper-2/presets/{dev_name}/{preset}.json")
+                    if os.path.exists(preset_file):
+                        try:
+                            os.remove(preset_file)
+                        except OSError as e:
+                            print(f"Error removing preset file {preset_file}: {e}")
+
+            # 3. Reset UI selection before refreshing
+            self.preset_combo.set("")
+            self.refresh_editor_dropdown()
 
     def refresh_linked_windows(self):
         for item in self.win_tree.get_children():
@@ -418,7 +435,6 @@ class MouseSwitcherApp(tk.Tk):
         preset_name = self.preset_combo.get()
         active_group = self.group_var.get()
         
-        # Always refresh the windows tree immediately
         self.refresh_linked_windows()
         
         if not preset_name or not active_group: return
@@ -426,19 +442,25 @@ class MouseSwitcherApp(tk.Tk):
         devices = self.config["sync_groups"][active_group].get("devices", {})
         if not devices: return
         
-        first_vid = list(devices.keys())[0]
-        target_device = devices[first_vid].get("dev_name", "")
+        self.current_preset_data = []
         
-        # We extract the hash out of the dictionary now
-        self.current_origin_hash = devices[first_vid].get("hash", "")
-        self.current_json_path = os.path.expanduser(f"~/.config/input-remapper-2/presets/{target_device}/{preset_name}.json")
-
-        if os.path.exists(self.current_json_path):
-            with open(self.current_json_path, 'r') as f:
-                data = json.load(f)
-                self.current_preset_data = data if isinstance(data, list) else []
-        else:
-            self.current_preset_data = []
+        # Look through all devices in the group to find existing preset data
+        for vid_pid, dev_info in devices.items():
+            dev_name = dev_info.get("dev_name", "")
+            dev_hash = dev_info.get("hash", "")
+            preset_path = os.path.expanduser(f"~/.config/input-remapper-2/presets/{dev_name}/{preset_name}.json")
+            
+            if os.path.exists(preset_path):
+                try:
+                    with open(preset_path, 'r') as f:
+                        data = json.load(f)
+                        if isinstance(data, list) and data:
+                            self.current_preset_data = data
+                            self.current_origin_hash = dev_hash
+                            self.current_json_path = preset_path
+                            break
+                except Exception as e:
+                    print(f"Error loading preset from {preset_path}: {e}")
 
         if self.selected_hw_id:
             self.select_grid_button(self.selected_btn_name, self.selected_hw_id)
@@ -503,28 +525,65 @@ class MouseSwitcherApp(tk.Tk):
         self.listen_btn.config(text="🟢 Listen for Keystroke", state="normal")
 
     def save_preset_json(self):
-        if not self.selected_hw_id or not self.current_json_path: return messagebox.showwarning("Error", "Select a preset and a button.")
+        if not self.selected_hw_id:
+            return messagebox.showwarning("Error", "Select a button on the MMO grid first.")
+            
+        active_group = self.group_var.get()
+        preset_name = self.preset_combo.get()
+        if not active_group or not preset_name:
+            return messagebox.showwarning("Error", "Select an active group and profile.")
+
         new_action = self.action_entry.get().strip()
-        
+
+        # Determine if this is a mouse or keyboard action
+        # evdev mouse buttons start with BTN_ or REL_ (e.g., BTN_LEFT, REL_WHEEL)
+        target_device = "mouse" if new_action.upper().startswith(("BTN_", "REL_")) else "keyboard"
+
+        # Update in-memory preset data
         for i in range(len(self.current_preset_data) - 1, -1, -1):
             mapping = self.current_preset_data[i]
             new_combos = [c for c in mapping.get("input_combination", []) if not (c.get("type") == 1 and c.get("code") == self.selected_hw_id)]
-            if not new_combos: del self.current_preset_data[i]
-            else: mapping["input_combination"] = new_combos
+            if not new_combos:
+                del self.current_preset_data[i]
+            else:
+                mapping["input_combination"] = new_combos
 
         if new_action:
             self.current_preset_data.append({
-                "input_combination": [{"type": 1, "code": self.selected_hw_id, "origin_hash": getattr(self, 'current_origin_hash', "")}],
-                "target_uinput": "keyboard,mouse",
+                "input_combination": [{
+                    "type": 1,
+                    "code": self.selected_hw_id,
+                    "origin_hash": ""
+                }],
+                "target_uinput": target_device,
                 "output_symbol": new_action,
                 "mapping_type": "key_macro",
                 "name": f"Button {self.selected_btn_name}"
             })
 
-        os.makedirs(os.path.dirname(self.current_json_path), exist_ok=True)
-        with open(self.current_json_path, 'w') as f: json.dump(self.current_preset_data, f, indent=4)
+        # Save to disk for EVERY device in the active Sync Group
+        devices = self.config["sync_groups"][active_group].get("devices", {})
+        for vid_pid, dev_info in devices.items():
+            dev_name = dev_info.get("dev_name")
+            dev_hash = dev_info.get("hash", "")
+            if dev_name:
+                dev_dir = os.path.expanduser(f"~/.config/input-remapper-2/presets/{dev_name}")
+                os.makedirs(dev_dir, exist_ok=True)
+                dev_json_path = os.path.join(dev_dir, f"{preset_name}.json")
+
+                # Create a deep copy with this specific device's hash
+                dev_preset_data = []
+                for mapping in self.current_preset_data:
+                    m_copy = json.loads(json.dumps(mapping))
+                    for combo in m_copy.get("input_combination", []):
+                        combo["origin_hash"] = dev_hash
+                    dev_preset_data.append(m_copy)
+
+                with open(dev_json_path, 'w') as f:
+                    json.dump(dev_preset_data, f, indent=4)
+
         self.refresh_grid_visuals()
-        messagebox.showinfo("Saved", f"Profile '{self.preset_combo.get()}' updated!")
+        messagebox.showinfo("Saved", f"Profile '{preset_name}' updated across all group devices!")
 
     def manual_apply_profile(self):
         preset = self.preset_combo.get()
