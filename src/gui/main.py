@@ -225,9 +225,26 @@ class MouseSwitcherApp(tk.Tk):
         active_group = self.group_var.get()
         if not active_group: return
         
-        mappings = self.config["sync_groups"].get(active_group, {}).get("mappings", {})
-        presets = sorted(list(mappings.keys()))
-        
+        group_data = self.config["sync_groups"].get(active_group, {})
+        mappings = group_data.get("mappings", {})
+        devices = group_data.get("devices", {})
+
+        # --- DISCOVER PRESETS CREATED IN INPUT-REMAPPER ---
+        discovered_presets = set(mappings.keys())
+        for vid_pid, dev_info in devices.items():
+            dev_name = dev_info.get("dev_name")
+            if dev_name:
+                dev_dir = os.path.expanduser(f"~/.config/input-remapper-2/presets/{dev_name}")
+                if os.path.isdir(dev_dir):
+                    for filename in os.listdir(dev_dir):
+                        if filename.endswith(".json"):
+                            preset_name = filename[:-5]
+                            discovered_presets.add(preset_name)
+                            if preset_name not in mappings:
+                                mappings[preset_name] = []
+                                self.save_config()
+
+        presets = sorted(list(discovered_presets))
         self.preset_combo['values'] = presets
         
         current = self.preset_combo.get()
@@ -256,9 +273,23 @@ class MouseSwitcherApp(tk.Tk):
             if not preset: return
             
             mappings = self.config["sync_groups"][active_group]["mappings"]
+            devices = self.config["sync_groups"][active_group].get("devices", {})
+
             if preset not in mappings:
                 mappings[preset] = []
                 self.save_config()
+
+                # Provision empty preset file for all devices in the group
+                for vid_pid, dev_info in devices.items():
+                    dev_name = dev_info.get("dev_name")
+                    if dev_name:
+                        target_dir = os.path.expanduser(f"~/.config/input-remapper-2/presets/{dev_name}")
+                        os.makedirs(target_dir, exist_ok=True)
+                        preset_file = os.path.join(target_dir, f"{preset}.json")
+                        if not os.path.exists(preset_file):
+                            with open(preset_file, "w") as f:
+                                json.dump([], f, indent=4)
+
                 self.refresh_editor_dropdown()
                 self.preset_combo.set(preset)
                 self.load_preset_json()

@@ -135,7 +135,12 @@ apply_profile() {
 
     # 2. Get the active group
     local active_group
-    active_group=$(jq -r '.sync_groups | keys[0]' "$CONFIG_FILE")
+    active_group=$(jq -r --arg win "$window_name" '
+        .sync_groups | to_entries[]? | 
+        select(.value.mappings | to_entries[]? | select(.value | type == "array" and index($win))) | 
+        .key
+    ' "$CONFIG_FILE" | head -n 1)
+    active_group="${active_group:-$(jq -r '.sync_groups | keys_unsorted[0]' "$CONFIG_FILE")}"
 
     # 3. Iterate over devices defined in this group
     mapfile -t devices < <(jq -r --arg grp "$active_group" \
