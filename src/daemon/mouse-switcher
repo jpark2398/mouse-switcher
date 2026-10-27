@@ -233,5 +233,23 @@ watch_window_events() {
     fi
 }
 
+watch_usb_events() {
+    echo "Watching for USB connect events..."
+    udevadm monitor --udev --subsystem-match=usb | while read -r line; do
+        if echo "$line" | grep -q " add "; then
+            # Debounce and delay to allow input-remapper to see the device
+            sleep 1.5
+            echo "USB device added, forcing profile re-apply..."
+            (
+                last_preset="USB_RECONNECT"
+                trigger_check
+            )
+            # Drain queue to debounce multiple events for the same connection
+            while read -r -t 1 drain; do :; done
+        fi
+    done
+}
+
+watch_usb_events &
 trigger_check
 watch_window_events
